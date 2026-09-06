@@ -1,6 +1,0 @@
-@echo off
-echo Gerekli kütüphaneler kuruluyor, lutfen bekleyin...
-pip install numpy scipy sounddevice PyQt6
-echo Kurulum tamamlandi. Sinyal Laboratuvari baslatiliyor...
-python Main.py
-pause
