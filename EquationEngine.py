@@ -29,10 +29,7 @@ class EquationEngine:
         self.is_parametric = self.left_expr != self.right_expr
 
         # PERFORMANS: eval(string, ...) her çağrıda ifadeyi yeniden
-        # PARSE EDER ve DERLER — bu, saniyede onlarca kez çağrılan
-        # evaluate()/evaluate_array() için gereksiz bir maliyettir.
-        # Bunun yerine ifadeyi SADECE denklem değiştiğinde bir kez
-        # derleyip (compile) kod nesnesini saklıyoruz; sonraki her
+        # PARSE EDER ve DERLER sonraki her
         # eval() çağrısı doğrudan bu hazır bytecode üzerinde çalışır.
         try:
             self._left_code = compile(self.left_expr, "<equation-left>", "eval")
@@ -80,7 +77,7 @@ class EquationEngine:
         safe_dict = dict(self.SAFE_FUNCS)
         safe_dict["t"] = t
         try:
-            return eval(code, {"__builtins__": None}, safe_dict)
+            return eval(code, {"__builtins__": {}}, safe_dict)
         except Exception as error:
             print(f"Denklem çalıştırma hatası: {error}")
             return 0.0
