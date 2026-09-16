@@ -17,7 +17,7 @@ from NeonPlot import (
 from DownloadDialog import DownloadDialog
 
 
-INSTRUMENTS = ["gitar", "ronroco", "ukulele", "flut", "kalimba", "santur"]
+INSTRUMENTS = ["gitar", "ronroco", "ukulele", "bas_gitar", "piyano", "ney", "kalimba", "flut"]
 SCALES = list(NoteMapper.SCALES.keys())
 NEON_COLORS = ["#39ff14", "#00e5ff", "#ff2fd0", "#ffe600", "#ff6a00", "#a5ff00"]
 
