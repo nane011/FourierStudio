@@ -20,6 +20,8 @@ class NoteMapper:
         "pentatonik_major": [0, 2, 4, 7, 9],
         "dogal_minor": [0, 2, 3, 5, 7, 8, 10],
         "major": [0, 2, 4, 5, 7, 9, 11],
+        "kromatik": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "harmonik_minor": [0, 2, 3, 5, 7, 8, 11], 
     }
 
     def __init__(self, base_frequency=220.0, scale="pentatonik_minor", octave_range=2):
