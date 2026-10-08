@@ -10,10 +10,6 @@ from scipy.io import wavfile
 class AudioEngine:
     """Bir veya birden fazla MelodyEngine sesini gerçek zamanlı olarak
     üretir ve sounddevice üzerinden çalar.
-
-    Ses üretimini ses kartının callback'inden ayırıyoruz. Böylece gitar,
-    santur gibi daha ağır enstrümanların hesaplaması ses kartının
-    zamanlamasını doğrudan bozmaz.
     """
 
     # Her callback'te 4096 örnek işlenir.
@@ -217,9 +213,6 @@ class AudioEngine:
 
                 # --------------------------------------------------
                 # MASTER SES (BELLEK OPTİMİZASYONU)
-                # --------------------------------------------------
-                # KRİTİK DEĞİŞİKLİK: Sürekli yeni bellek bloğu açarak (Garbage Collector'ı yorarak)
-                # kasmayı engellemek için, aynı array üzerinde (in-place) matematik işlemi yapıyoruz.
                 
                 combined *= 1.1
                 np.tanh(combined, out=combined)

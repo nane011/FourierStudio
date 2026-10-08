@@ -16,6 +16,7 @@ class EquationEngine:
         "sin": np.sin, "cos": np.cos, "tan": np.tan,
         "pi": np.pi, "e": np.e,
         "abs": np.abs, "sqrt": np.sqrt, "exp": np.exp,
+        "floor": np.floor,
     }
 
     def __init__(self, equation_str, role="ana ses", color="#39ff14"):

@@ -17,7 +17,7 @@ from NeonPlot import (
 from DownloadDialog import DownloadDialog
 
 
-INSTRUMENTS = ["gitar", "ronroco", "ukulele", "bas_gitar", "piyano", "ney", "kalimba", "flut"]
+INSTRUMENTS = ["gitar", "bowed_guitar", "ronroco", "ukulele", "bas_gitar", "piyano", "ney", "kalimba", "flut"]
 SCALES = list(NoteMapper.SCALES.keys())
 NEON_COLORS = ["#39ff14", "#00e5ff", "#ff2fd0", "#ffe600", "#ff6a00", "#a5ff00"]
 
@@ -59,7 +59,7 @@ class EquationRow(QFrame):
     def __init__(self, row_id, index, synth, sample_rate=44100, parent=None):
         super().__init__(parent)
         self.setObjectName("row")
-        self.row_id = row_id                # AudioEngine/dict anahtarı olarak kullanılan BENZERSİZ id
+        self.row_id = row_id
         self.sample_rate = sample_rate
         self.synth = synth
         self.color_hex = NEON_COLORS[index % len(NEON_COLORS)]
