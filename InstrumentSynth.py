@@ -1,6 +1,24 @@
 import numpy as np
 from scipy.signal import butter, lfilter
+from numba import njit
 
+@njit(cache=True)
+def _karplus_feedback(excitation, delay, g):
+    n = len(excitation)
+    wave = np.zeros(n, dtype=np.float32)
+
+    for i in range(n):
+        value = excitation[i]
+
+        if i >= delay:
+            value += 0.5 * g * wave[i - delay]
+
+        if i >= delay + 1:
+            value += 0.5 * g * wave[i - delay - 1]
+
+        wave[i] = value
+
+    return wave
 
 class InstrumentSynth:
     """Fiziksel/additive modelleme ile enstrüman notaları üreten motor.
@@ -19,56 +37,83 @@ class InstrumentSynth:
                 "type": "string",
                 "model": "plucked_string",
                 "harmonics": [(1, 1.00)], 
-                "decay": 0.8,        
+                "decay": 0.15,
                 "attack": 0.003,     
-                "detune": 0.0012,
-                "pluck_noise": 0.15, 
+                "detune": 0.012,
+                "pluck_noise": 0.30, 
                 "string_damping": 0.0015, 
-                "body_gain": 5,
-                "body_freq": 1.0,
-                "body_width": 95.0,
+                "body_gain": 20,
+                "body_freq": 0.0,
+                "body_width": 300.0,
             },
             "ronroco": {
                 "type": "string",
                 "model": "double_string",
-                "harmonics": [(1, 1.00)],
-                "decay": 0.25,        
-                "attack": 0.005,     
-                "detune": 0.040,    
-                "pluck_noise": 0.08,
-                "string_damping": 0.0010, 
-                "body_gain": 0.25,
-                "body_freq": 0.1,
-                "body_width": 0.1,
+
+                "harmonics": [
+                    (1, 10.00),  # Güçlü temel ses: dolgun ve sıcak ton
+                    (2, 17.50),  # Güçlü oktav: belirgin ilk vuruş
+                    (3, 2.20),   # Ronroco karakteri ve gövde
+                    (4, 0.90),   # Kontrollü parlaklık
+                    (5, 0.35),   # Hafif tel parıltısı
+                    (6, 0.14),   # Az miktarda atak sertliği
+                    (7, 0.05),   # Çok hafif metalik ayrıntı
+                    (8, 0.015)   # Üst frekansları sınırlama
+                ],
+
+                "decay": 0.65,
+                "attack": 0.025,
+                "detune": 0.0020,
+                "pluck_noise": 0.075,
+                "string_damping": 0.0015,
+
+                "body_gain": 1.00,
+                "body_freq": 220.0,
+                "body_width": 180.0,
             },
             "bowed_guitar": {
                 "type": "string",
                 "model": "bowed_string",
+
                 "harmonics": [
-                    (1, 5.00),
-                    (2, 0.5),
-                    (3, 0.40),
-                    (4, 0.045),
-                    (5, 0.988),
-                    (6, 0.1430),
-                    (7, 0.0435) 
+                    (1, 5.00),    # Sıcak ve dolgun ana ses
+                    (2, 0.85),    # Yumuşak oktav desteği
+                    (3, 0.32),    # Hafif nefesli karakter
+                    (4, 0.10),    # Kontrollü üst orta frekans
+                    (5, 0.32),    # Hafif yay rezonansı
+                    (6, 0.09),    # İnce yay dokusu
+                    (7, 0.025)    # Çok hafif üst frekans
                 ],
-                "decay": 0.05,       
-                "attack": 0.45,      
-                "release": 1.2,      
-                "string_damping": 0.0001, 
-                "vibrato_rate": 3.8,  
-                "vibrato_depth": 0.004,
+
+                "decay": 0.05,
+                "attack": 0.40,
+                "release": 1.2,
+
+                "string_damping": 0.0001,
+
+                "vibrato_rate": 3.4,
+                "vibrato_depth": 0.0012,
             },
             "ukulele": {
                 "type": "string",
                 "model": "plucked_string",
-                "harmonics": [(1, 1.00)],
-                "decay": 0.5,        
-                "attack": 0.004,
+
+                "harmonics": [
+                    (1, 1.00),
+                    (2, 0.42),
+                    (3, 0.18),
+                    (4, 0.065),
+                    (5, 0.020)
+                ],
+
+                "harmonic_blend": 0.18,
+
+                "decay": 0.65,
+                "attack": 0.003,
                 "detune": 0.0010,
-                "pluck_noise": 0.16,
-                "string_damping": 0.10,
+                "pluck_noise": 0.10,
+                "string_damping": 0.025,
+
                 "body_gain": 0.13,
                 "body_freq": 330.0,
                 "body_width": 120.0,
@@ -118,11 +163,19 @@ class InstrumentSynth:
         }
 
         self._gains = {}
+
         for name, cfg in self.instruments.items():
             harmonic_sum = sum(a for _, a in cfg["harmonics"])
+
             if cfg["type"] == "wind":
                 harmonic_sum += 0.04
-            self._gains[name] = 0.92 / harmonic_sum
+
+            if cfg.get("model") == "double_string":
+                # Harmonikler render aşamasında normalize edilecek.
+                # Bu nedenle harmonik toplamına göre tekrar kısma yapma.
+                self._gains[name] = 0.92
+            else:
+                self._gains[name] = 0.92 / max(harmonic_sum, 1e-8)
 
         # INIT İÇİNE BOWED GUITAR İÇİN ÖZEL ELEKTRO GİTAR AMFİ FİLTRESİ EKLENDİ (PERFORMANS İÇİN)
         self._pluck_b, self._pluck_a = butter(2, 3000 / (sample_rate / 2), btype="low")
@@ -285,14 +338,7 @@ class InstrumentSynth:
         string_damping = config.get("string_damping", 0.05)
         g = 1.0 - string_damping # Kazanç (1'e ne kadar yakınsa o kadar uzun sustain)
         
-        # IIR Filtre katsayıları (y[n] = x[n] + 0.5 * g * (y[n-delay] + y[n-delay-1]))
-        b = np.array([1.0], dtype=np.float32)
-        a = np.zeros(delay + 2, dtype=np.float32)
-        a[0] = 1.0
-        a[delay] = -0.5 * g
-        a[delay + 1] = -0.5 * g
-
-        wave = lfilter(b, a, excitation)
+        wave = _karplus_feedback(excitation, delay, g)
 
         # 3. Genel Sönümlenme
         envelope = np.exp(-config["decay"] * t)
@@ -309,9 +355,66 @@ class InstrumentSynth:
         body_env = np.clip(1.0 - np.abs(frequency - body_freq) / max(body_width, 1.0), 0.0, 1.0)
         return wave + resonance * body_gain * body_env
 
+    def _render_double_string(self, frequency, t, config):
+
+        detune = config.get("detune", 0.0020)
+        decay = config.get("decay", 0.65)
+
+        # 1. Doğal tel sesi: Karplus-Strong
+        string_a = self._string_wave(
+            frequency, t, config, seed_offset=1
+        )
+        string_b = self._string_wave(
+            frequency * (1.0 + detune),
+            t, config, seed_offset=2
+        )
+
+        string_body = 0.5 * (string_a + string_b)
+
+        # 2. Harmonik katman
+        harmonics = config["harmonics"]
+        harmonics = harmonics[:6]
+
+        total = max(
+            sum(abs(amp) for _, amp in harmonics),
+            1e-8
+        )
+
+        harmonic_body = np.zeros_like(t, dtype=np.float32)
+
+        for harmonic, amplitude in harmonics:
+            partial_decay = decay * (
+                1.0 + 0.35 * (harmonic - 1)
+            )
+
+            harmonic_body += (
+                (amplitude / total)
+                * np.sin(2.0 * np.pi * frequency * harmonic * t)
+                * np.exp(-partial_decay * t)
+            ).astype(np.float32)
+
+        # Doğal tel baskın, harmonikler tınıyı renklendiriyor.
+        wave = 0.80 * string_body + 0.20 * harmonic_body
+
+        # Gövde rezonansı ve tel çekme sesi
+        body_config = dict(config)
+        body_config["body_gain"] = config.get("body_gain", 0.25)
+
+        wave = self._body_resonance(
+            frequency, t, wave, body_config
+        )
+        wave += self._pluck_burst(t, config)
+
+        return wave.astype(np.float32)
+
     def _render_string(self, frequency, t, config):
         model = config.get("model", "plucked_string")
-        
+
+        if model == "double_string":
+            return self._render_double_string(
+                frequency, t, config
+            )
+
         if model == "piano":
             body = self._harmonic_body(frequency, t, config)
             attack = config["attack"]
@@ -328,6 +431,35 @@ class InstrumentSynth:
             body = (string_a + string_b) * 0.50
         else:
             body = self._string_wave(frequency, t, config)
+
+        blend = config.get("harmonic_blend", 0.0)
+
+        if blend > 0.0:
+            harmonics = config["harmonics"]
+            total = max(
+                sum(abs(amp) for _, amp in harmonics),
+                1e-8
+            )
+        
+            harmonic_body = np.zeros_like(t, dtype=np.float32)
+        
+            for harmonic, amplitude in harmonics:
+                partial_decay = config["decay"] * (
+                    1.0 + 0.35 * (harmonic - 1)
+                )
+        
+                harmonic_body += (
+                    (amplitude / total)
+                    * np.sin(
+                        2.0 * np.pi * frequency * harmonic * t
+                    )
+                    * np.exp(-partial_decay * t)
+                ).astype(np.float32)
+        
+            body = (
+                (1.0 - blend) * body
+                + blend * harmonic_body
+            )
         
         attack = config["attack"]
         attack_env = np.ones_like(t)
