@@ -36,28 +36,19 @@ class NoteMapper:
     def _frequency_from_index(self, index):
         notes_per_octave = len(self.semitones)
 
-        #alt ve üst tam sayı indekslerini bul
-        lower_index=int(np.floor(index))
-        upper_index=lower_index+1
+        # ARTIK KÜSÜRATLARI SİLİYORUZ, NOTAYI EN YAKIN TAM NOTAYA KİLİTLİYORUZ
+        exact_index = int(np.round(index))
 
-        #aradaki küsüratı bul
-        fraction=index-lower_index
+        # Notanın gam içindeki derecesini ve oktavını bul
+        octave, degree = divmod(exact_index, notes_per_octave)
+        
+        # Sınır dışına taşmayı engellemek için dereceyi güvenliğe al
+        degree = degree % notes_per_octave
+        
+        semitone = self.semitones[degree] + 12 * octave
 
-        #alt notanın semitone yani yarım ses değerini hesapla
-        octave_lower, degree_lower=divmod(lower_index, notes_per_octave)
-        semitone_lower=self.semitones[degree_lower]+12*octave_lower
-
-        #üst notanın değerini hesapla
-        octave_upper, degree_upper=divmod(upper_index, notes_per_octave)
-        semitone_upper=self.semitones[degree_upper]+12*octave_upper
-
-        #iki nota arasında küsürat kadar esnetiyoruz, yumuşak geçiş burada sağlanıyor
-        exact_semitone=semitone_lower+(semitone_upper-semitone_lower)*fraction
-
-        return self.base_frequency*(2.0**(exact_semitone/12.0))
-
-
-
+        return self.base_frequency * (2.0 ** (semitone / 12.0))
+    
     def map_value(self, raw_value):
         """raw_value: EquationEngine.evaluate() çıktısı — float ya da
         (x, y) tuple. Döner: (frequency, velocity)."""
