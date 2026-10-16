@@ -2,25 +2,26 @@ import numpy as np
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath, QLinearGradient, QBrush
 from PyQt6.QtCore import Qt
-
+from PyQt6.QtGui import QPolygonF
+from PyQt6.QtCore import QPointF
+import time
 
 class RingBuffer:
-    """Gerçek dairesel tampon: O(chunk_len) yazma, O(max_points) okuma.
+    """Gerçek dairesel tampon: O(chunk_len) yazma, O(max_points) okuma."""
 
-    ÖNCEKİ SÜRÜMDEKİ SORUN: her push'ta `np.concatenate([ring[n:], chunk])`
-    ile TÜM geçmiş (örn. 3 saniye @44100 = 132300 eleman) yeniden
-    kopyalanıyordu — saniyede onlarca MB gereksiz memmove. Burada artık
-    sadece gelen küçük chunk (örn. 2048 örnek) yazılıyor; okuma da
-    sadece ekranda gösterilecek kadar (max_points) örnek çekiyor, tüm
-    tarihçeyi hiç kopyalamadan (modüler indeksleme ile)."""
-
-    __slots__ = ("length", "buf", "write_pos", "filled")
+    # Değişken isimleri slots içinde ve metotlarda tamamen eşitlendi
+    __slots__ = ("length", "buf", "write_pos", "filled", "_cached_count", "_cached_idx_filled", "_cached_idx_unfilled")
 
     def __init__(self, length):
         self.length = max(1, int(length))
         self.buf = np.zeros(self.length, dtype=np.float32)
         self.write_pos = 0
         self.filled = False
+        
+        # Performans önbelleği başlangıç değerleri
+        self._cached_count = -1
+        self._cached_idx_filled = None
+        self._cached_idx_unfilled = {}
 
     def write(self, chunk):
         chunk = np.asarray(chunk, dtype=np.float32)
@@ -48,45 +49,45 @@ class RingBuffer:
         self.write_pos = end % self.length
 
     def read_downsampled(self, max_points):
-        """Tüm tarihçeyi hiç birleştirmeden (concatenate), doğrudan
-        modüler (wrap-around) fancy-index ile örnekleyip döndürür."""
+        """Hafıza korumalı (cache) fancy-index yapısı ile işlemciyi hiç yormadan
+        verileri hızlıca seyreltip grafik motoruna teslim eder."""
+        
         if not self.filled:
             n = self.write_pos
             if n < 2:
                 return np.zeros(2, dtype=np.float32)
+            
             count = min(max_points, n)
-            idx = np.linspace(0, n - 1, count).astype(np.int64)
+            
+            cache_key = (n, count)
+            if cache_key not in self._cached_idx_unfilled:
+                self._cached_idx_unfilled[cache_key] = np.linspace(0, n - 1, count).astype(np.int64)
+            
+            idx = self._cached_idx_unfilled[cache_key]
             return self.buf[idx]
 
+        # Tampon tamamen dolduğunda tetiklenen ultra hızlı alan
         count = min(max_points, self.length)
-        idx = np.linspace(0, self.length - 1, count).astype(np.int64)
-        idx = (self.write_pos + idx) % self.length
+        
+        # Eğer max_points değişmediyse linspace'i baştan hesaplama, hafızadan çağır!
+        if self._cached_count != count:
+            self._cached_count = count
+            self._cached_idx_filled = np.linspace(0, self.length - 1, count).astype(np.int64)
+
+        # Modüler dairesel indeks kaydırması
+        idx = (self.write_pos + self._cached_idx_filled) % self.length
         return self.buf[idx]
 
     def reset(self):
         self.buf[:] = 0
         self.write_pos = 0
         self.filled = False
-
+        # Temizlik anında önbellek alanlarını da sıfırlıyoruz
+        self._cached_count = -1
+        self._cached_idx_unfilled = {}
+        self._cached_idx_filled = None
 
 class NeonLinePlot(QWidget):
-    """Siyah zemin üzerinde neon çizgili temel grafik widget'ı.
-
-    PERFORMANS NOTU (bu sürümdeki değişiklik): Önceki sürüm her nokta
-    için ayrı bir QPointF nesnesi oluşturup path.lineTo(QPointF)
-    çağırıyordu — n nokta için n QPointF nesnesi + n Python fonksiyon
-    çağrısı. Artık:
-      1) Koordinat dönüşümü (normalize -1..1 -> piksel) TEK SEFERDE,
-         numpy ile vektörize yapılıyor (Python döngüsü yok).
-      2) QPointF hiç oluşturulmuyor; path.lineTo(x, y) float
-         overload'u doğrudan kullanılıyor (nesne oluşturma maliyeti
-         sıfır).
-      3) QPainterPath.reserve(n) ile iç dizi baştan büyük ayrılıyor,
-         lineTo çağrıları sırasında tekrar tekrar yeniden ayırma
-         (realloc) olmuyor.
-    Kalan tek Python döngüsü sadece path.lineTo çağrılarının kendisi;
-    bu artık en ucuz kısım."""
-
     def __init__(self, color="#39ff14", parent=None):
         super().__init__(parent)
         self._series = {}   # {isim: (xs_array, ys_array, QColor, fade_bool)}
@@ -120,65 +121,78 @@ class NeonLinePlot(QWidget):
 
         w = self.width()
         h = self.height()
-        margin = 6
-        span_x = max(1, w - 2 * margin)
-        span_y = max(1, h - 2 * margin)
+
+        # Önceki 6 px yerine 2 px: çizgi alanı biraz uzar.
+        margin = 2
+
+        available_w = max(1, w - 2 * margin)
+        available_h = max(1, h - 2 * margin)
+        square_size = min(available_w, available_h)
+
+        offset_x = margin + (available_w - square_size) / 2
+        offset_y = margin + (available_h - square_size) / 2
+
+        painter.setRenderHint(
+            QPainter.RenderHint.Antialiasing, True
+        )
 
         for _, entry in self._series.items():
             xs, ys, color, fade = entry
             n = len(xs)
+
             if n < 2:
                 continue
 
-            # --- Vektörize koordinat dönüşümü (Python döngüsü yok) ---
-            px = margin + (xs * 0.5 + 0.5) * span_x
-            py = margin + (0.5 - ys * 0.5) * span_y
-            px_list = px.tolist()
-            py_list = py.tolist()
+            px = offset_x + (xs * 0.5 + 0.5) * square_size
+            py = offset_y + (0.5 - ys * 0.5) * square_size
+
+            points = [
+                QPointF(float(x), float(y))
+                for x, y in zip(px, py)
+            ]
 
             path = QPainterPath()
-            if hasattr(path, "reserve"):
-                path.reserve(n)
-            path.moveTo(px_list[0], py_list[0])
-            for x, y in zip(px_list[1:], py_list[1:]):
-                path.lineTo(x, y)
+            path.addPolygon(QPolygonF(points))
 
+            # Uçlara doğru saydamlaşan yatay gradient.
             if fade:
-                grad = QLinearGradient(0, 0, w, 0)
-                faint = QColor(color)
-                faint.setAlpha(20)
-                bright = QColor(color)
-                bright.setAlpha(235)
-                grad.setColorAt(0.0, faint)
-                grad.setColorAt(1.0, bright)
-                brush = QBrush(grad)
+                start_color = QColor(color)
+                end_color = QColor(color)
+                start_color.setAlpha(0)
+                end_color.setAlpha(0)
+
+                gradient = QLinearGradient(
+                    offset_x, 0,
+                    offset_x + square_size, 0
+                )
+                gradient.setColorAt(0.00, start_color)
+                gradient.setColorAt(0.08, color)
+                gradient.setColorAt(0.92, color)
+                gradient.setColorAt(1.00, end_color)
+
+                brush = QBrush(gradient)
             else:
                 brush = QBrush(color)
 
-            # PERFORMANS: profil çıkardığımda gerçek maliyetin gradyan
-            # DEĞİL, geniş (6px) çizginin anti-alias'lı birleşim
-            # (join)/uç (cap) hesaplaması olduğunu gördüm — nokta
-            # sayısıyla doğru orantılı büyüyor. Glow katmanı zaten
-            # bulanık/yarı saydam olduğu için AA'sız çizilse de fark
-            # edilmiyor; ~4-6x daha hızlı. İnce, parlak çekirdek
-            # çizgide netlik için AA açık bırakılıyor (o da ucuz,
-            # çünkü çizgi ince).
+            # Neon dış parıltısı.
             glow_pen = QPen(brush, 6)
             glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             glow_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            painter.setOpacity(0.30)
+
+            painter.setOpacity(0.25)
             painter.setPen(glow_pen)
             painter.drawPath(path)
 
+            # Keskin, ana çizgi.
             core_pen = QPen(brush, 1.8)
             core_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             core_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
             painter.setOpacity(1.0)
             painter.setPen(core_pen)
             painter.drawPath(path)
 
+            painter.setOpacity(1.0)
 
 # ------------------------------------------------------------------
 # TEKLİ (tek renk) grafikler — her denklem satırının kendi paneli
@@ -193,18 +207,37 @@ class WaveformPlot(NeonLinePlot):
         super().__init__(color=color, parent=parent)
         self.sample_rate = sample_rate
         self._ring = RingBuffer(int(history_seconds * sample_rate))
+        self._last_draw_time = 0.0
+        self._draw_interval = 1.0 / 30.0
 
-    def push_audio(self, audio_chunk, max_points=90):
+    def push_audio(self, audio_chunk, max_points=350):
         chunk = np.asarray(audio_chunk, dtype=np.float32)
         if len(chunk) == 0:
             return
 
+        # Ses verisini her zaman tamponla.
         self._ring.write(chunk)
-        display = self._ring.read_downsampled(max_points)
 
-        xs = np.linspace(-1, 1, len(display))
+        # Ekranı en fazla 30 FPS hızında güncelle.
+        now = time.perf_counter()
+        if now - self._last_draw_time < self._draw_interval:
+            return
+
+        self._last_draw_time = now
+
+        display = self._ring.read_downsampled(max_points)
+        n_display = len(display)
+
+        if (
+            not hasattr(self, "_cached_xs")
+            or len(self._cached_xs) != n_display
+        ):
+            self._cached_xs = np.linspace(
+                -1, 1, n_display, dtype=np.float64
+            )
+
         ys = np.clip(display, -1, 1)
-        self.set_points(xs, ys)
+        self.set_points(self._cached_xs, ys)
 
     # eski API ile uyum
     def update_from_audio(self, audio_buffer):
@@ -273,31 +306,66 @@ class MultiWaveformPlot(NeonLinePlot):
         self.sample_rate = sample_rate
         self.history_len = int(history_seconds * sample_rate)
         self._rings = {}   # isim -> RingBuffer
+        self._xs_cache = {}
+        self._last_draw_time = 0.0
+        self._draw_interval = 1.0 / 30.0
 
-    def push(self, per_voice_waves, colors, max_points=80):
-        series = {}
+    def push(self, per_voice_waves, colors, max_points=300):
+        # 1. Gelen bütün ses parçalarını kaydet.
         for name, chunk in per_voice_waves.items():
             ring = self._rings.get(name)
+    
             if ring is None:
                 ring = RingBuffer(self.history_len)
                 self._rings[name] = ring
+    
             ring.write(chunk)
-
-            display = ring.read_downsampled(max_points)
-            xs = np.linspace(-1, 1, len(display))
-            ys = np.clip(display, -1, 1)
-            series[name] = (xs, ys, colors.get(name, self._default_color), True)
-
+    
+        # Artık bulunmayan kanalları temizle.
         for stale in list(self._rings.keys()):
             if stale not in per_voice_waves:
                 del self._rings[stale]
-
+    
+        # 2. Çizim sıklığını sınırla.
+        now = time.perf_counter()
+    
+        if now - self._last_draw_time < self._draw_interval:
+            return
+    
+        self._last_draw_time = now
+    
+        # 3. Yalnızca çizim zamanı geldiğinde koordinatları üret.
+        series = {}
+    
+        for name in per_voice_waves:
+            ring = self._rings[name]
+            display = ring.read_downsampled(max_points)
+            n_display = len(display)
+    
+            xs = self._xs_cache.get(n_display)
+    
+            if xs is None:
+                xs = np.linspace(
+                    -1, 1, n_display, dtype=np.float64
+                )
+                self._xs_cache[n_display] = xs
+    
+            ys = np.clip(display, -1, 1)
+    
+            series[name] = (
+                xs,
+                ys,
+                colors.get(name, self._default_color),
+                True
+            )
+    
         self.set_series(series)
 
     def reset_rings(self):
-        self._rings = {}
+        """Tüm ses tamponlarını ve çizimleri sıfırlar."""
+        self._rings.clear()
         self.clear()
-
+        self._last_draw_time = 0.0
 
 class MultiSpectrumPlot(NeonLinePlot):
 
