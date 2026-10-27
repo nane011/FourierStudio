@@ -122,15 +122,32 @@ class InstrumentSynth:
                 "type": "string",
                 "model": "plucked_string",
                 "dark_excitation": True, 
-                "harmonics": [(1, 1.00)],
-                "decay": 1.2,
-                "attack": 0.015,     
+                "harmonics": [
+                    (1, 1.00),   # Temel bas gövdesi
+                    (2, 0.45),   # YENİ KATMAN: Yüksek notalara çıkıldığında sesin cılızlaşmasını önleyen, tınıyı koruyan oktav harmoniği
+                    (3, 0.15)    # Sese o telli bas gitar hissiyatını (growl) veren hafif pürüz
+                ],
+                "decay": 1.4,    # Yüksek notaların biraz daha süzülerek duyulması için hafifçe uzatıldı
+                "attack": 0.012,     
                 "detune": 0.000,
                 "pluck_noise": 0.01, 
-                "string_damping": 0.03, 
-                "body_gain": 0.18,
-                "body_freq": 60.0,   
-                "body_width": 55.0,
+                "string_damping": 0.02, # Yüksek notalarda telin enerjisini çok hızlı kaybetmesini engellemek için biraz düşürüldü
+                "kick_burst": 15.0,     # Üst notalarda tokat sesine dönmemesi için biraz dengelendi
+                "body_gain": 8.5,       # Filtre genişlediği için kazanç dengelendi
+                "body_freq": 65.0,      # DÜZELTME: 20Hz'den 65Hz'e çekildi. Yüksek notaların da filtreden geçebilmesini sağlar
+                "body_width": 140.0,    # DÜZELTME: 55'ten 140'a fırlatıldı. Filtre aralığı genişlediği için üst notalar artık boğulmayacak
+            },
+
+            "kick_bass": {
+                "type": "kick_bass",
+                "harmonics": [(1, 0.35)],
+                "decay": 2.5,
+                "attack": 0.01,
+                "kick_burst": 1.5,
+                "body_freq": 45.0,
+                "kick_start_freq": 65.0,
+                "body_gain": 1.0,
+                "ring_time": 1.0,
             },
             "piyano": {
                 "type": "string",
@@ -167,6 +184,12 @@ class InstrumentSynth:
         for name, cfg in self.instruments.items():
             harmonic_sum = sum(a for _, a in cfg["harmonics"])
 
+            if cfg["type"] == "kick_bass":
+                self._gains[name] = 5
+                continue
+
+            harmonic_sum = sum(a for _, a in cfg["harmonics"])
+
             if cfg["type"] == "wind":
                 harmonic_sum += 0.04
 
@@ -182,6 +205,17 @@ class InstrumentSynth:
         self._breath_b, self._breath_a = butter(2, 2200 / (sample_rate / 2), btype="low")
         self._amp_b, self._amp_a = butter(2, 3500 / (sample_rate / 2), btype="low")
 
+        # Kick/bas davul filtresi
+        kick_cutoff = min(180.0, self.sample_rate * 0.45)
+
+        self._kick_b, self._kick_a = butter(
+            2,
+            kick_cutoff / (self.sample_rate / 2),
+            btype="low"
+        )
+
+        self._kick_b = self._kick_b.astype(np.float32)
+        self._kick_a = self._kick_a.astype(np.float32)
     # ------------------------------------------------------------
 
     def harmonic_frequencies(self, instrument, frequency, n=8):
@@ -190,7 +224,14 @@ class InstrumentSynth:
 
     def max_ring_time(self, instrument):
         cfg = self.instruments.get(instrument.lower(), self.instruments["gitar"])
-        
+
+        if cfg["type"] == "kick_bass":
+            return (
+                float(cfg.get("ring_time", 1.0))
+                + cfg["attack"]
+                + 0.05
+            )
+    
         # DÜZELTME: Eğer enstrüman üflemeliyse veya keman yaylı gitarsa, süre patlamasını engelle
         if cfg["type"] == "wind" or cfg.get("model") == "bowed_string":
             return cfg["attack"] + cfg.get("release", 0.25) + 0.05
@@ -218,16 +259,21 @@ class InstrumentSynth:
                     wave = self._render_bowed(frequency, t, config, duration)
                 else:
                     wave = self._render_string(frequency, t, config)
+            elif config["type"] == "kick_bass":
+                wave = self._render_kick_bass(frequency, t, config)
             elif config["type"] == "wind":
                 wave = self._render_flute(frequency, t, config, duration)
             elif config["type"] == "metal":
                 wave = self._render_metal(frequency, t, config)
             else:
                 wave = np.zeros_like(t)
-            
+
+            if len(self._wave_cache) >= 128:
+                self._wave_cache.pop(next(iter(self._wave_cache)))
+
             self._wave_cache[cache_key] = wave
 
-        return (wave * gain).astype(np.float32)
+        return wave * np.float32(gain)
 
     #bowd gitar için
     def _render_bowed(self, frequency, t, config, duration):
@@ -321,7 +367,7 @@ class InstrumentSynth:
 
         # BAS GİTAR İÇİN KARANLIK (DARK) FİLTRE:
         if config.get("dark_excitation", False):
-            cutoff_freq = 70 
+            cutoff_freq = 100 
             nyquist = self.sample_rate / 2
             b_low, a_low = butter(4, cutoff_freq / nyquist, btype="low")
             noise_burst = lfilter(b_low, a_low, noise_burst)
@@ -471,6 +517,56 @@ class InstrumentSynth:
         body += self._pluck_burst(t, config)
         return body
 
+    def _render_kick_bass(self, frequency, t, config):
+        t = np.asarray(t, dtype=np.float32)
+
+        # 1. Temel frekans
+        harmonic = config["harmonics"][0]
+        h_mult = float(harmonic[0])
+        h_amp = float(harmonic[1])
+
+        phase = 2 * np.pi * frequency * h_mult * t
+        wave = h_amp * np.sin(phase)
+
+        # 2. Kick gövdesi
+        kick_gain = float(config.get("kick_burst", 2.5))
+        burst_len = max(float(config["attack"]) * 12.0, 0.035)
+
+        kick_envelope = np.exp(-t / burst_len).astype(np.float32)
+
+        kick_freq = float(config.get("body_freq", 45.0))
+        kick_start_freq = float(
+            config.get("kick_start_freq", kick_freq * 2.1)
+        )
+
+        # Başlangıçta yüksek, ardından düşük frekansa inen kick.
+        # Faz, anlık frekansın zamana göre integraliyle hesaplanır.
+        kick_phase = 2 * np.pi * (
+            kick_freq * t
+            + (kick_start_freq - kick_freq)
+            * burst_len
+            * (1.0 - kick_envelope)
+        )
+
+        kick_wave = np.sin(kick_phase)
+        wave += kick_wave * kick_envelope * kick_gain
+
+        # 3. Genel sönümlenme
+        decay = max(float(config.get("decay", 2.5)), 0.05)
+        decay_env = np.exp(-decay * t).astype(np.float32)
+        wave *= decay_env
+
+        # 4. Gövde filtresi
+        wave = lfilter(
+            self._kick_b,
+            self._kick_a,
+            wave.astype(np.float32, copy=False)
+        )
+
+        wave = np.asarray(wave, dtype=np.float32)
+        wave *= float(config.get("body_gain", 1.0))
+
+        return wave
     # ---------------- Flüt ----------------
 
     def _render_flute(self, frequency, t, config, duration):
