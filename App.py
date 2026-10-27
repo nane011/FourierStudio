@@ -17,7 +17,7 @@ from NeonPlot import (
 from DownloadDialog import DownloadDialog
 
 
-INSTRUMENTS = ["gitar", "bowed_guitar", "ronroco", "ukulele", "bas_gitar", "piyano", "ney", "kalimba", "flut"]
+INSTRUMENTS = ["gitar", "bowed_guitar", "ronroco", "ukulele", "bas_gitar", "kick_bass", "piyano", "ney", "kalimba", "flut"]
 SCALES = list(NoteMapper.SCALES.keys())
 NEON_COLORS = ["#39ff14", "#00e5ff", "#ff2fd0", "#ffe600", "#ff6a00", "#a5ff00"]
 
@@ -43,16 +43,18 @@ QScrollArea { border: none; }
 QFrame#row { border-radius: 8px; }
 """
 
-# GUI zamanlayıcısı: hafif işler (kayan osiloskop) her tikte, ağır
-# işler (FFT spektrum, denklem eğrisi yeniden hesaplama) her N tikte
-# bir yapılır. Bu, GIL'in ses callback'ini geciktirmesini önlemeye
-# yardımcı olur.
-FAST_TICK_MS = 60
+# Grafik zamanlayıcısı yaklaşık 60 FPS hedefler.
+FAST_TICK_MS = 16
 HEAVY_TICK_EVERY = 4
+
+# Varsayılan kelebek eğrisi için standart parametrik aralık 0..12π.
+# AudioEngine.playback_position_seconds bu aralığın çizim ilerlemesini sürer.
+VECTOR_T_END = 12.0 * np.pi
+VECTOR_POINT_COUNT = 1800
 
 
 class EquationRow(QFrame):
-    """Tek bir denklem satırı = tek bir 'ses' (voice): rol, denklem,
+    """Tek bir denklem satırı = tek bir ses (voice): rol, denklem,
     enstrüman, gam, baz frekans, nota süresi, ses seviyesi + kendi
     ton kayıt istasyonu / spektrum / vektör matrisi grafikleri."""
 
@@ -65,6 +67,12 @@ class EquationRow(QFrame):
         self.color_hex = NEON_COLORS[index % len(NEON_COLORS)]
         self.color = QColor(self.color_hex)
         self.is_playing = False
+
+        self.vector_t_end = VECTOR_T_END
+        self.vector_point_count = VECTOR_POINT_COUNT
+        self._vector_path_prepared = False
+        self._vector_xs = None
+        self._vector_ys = None
 
         self._build_ui()
         self._apply_border(active=False)
@@ -150,7 +158,9 @@ class EquationRow(QFrame):
         self.stop_button = QPushButton("⏹ Durdur")
         layout.addWidget(self.stop_button, 3, 5)
 
-        self.waveform_plot = WaveformPlot(color=self.color_hex, sample_rate=self.sample_rate)
+        self.waveform_plot = WaveformPlot(
+            color=self.color_hex, sample_rate=self.sample_rate
+        )
         self.spectrum_plot = SpectrumPlot(color=self.color_hex)
         self.vector_plot = VectorPlot(color=self.color_hex)
 
@@ -158,7 +168,6 @@ class EquationRow(QFrame):
         graphs.addWidget(self._titled(self.waveform_plot, "TON KAYIT İSTASYONU"))
         graphs.addWidget(self._titled(self.spectrum_plot, "SPEKTRUM"))
         graphs.addWidget(self._titled(self.vector_plot, "VEKTÖR MATRİSİ"))
-
         layout.addLayout(graphs, 4, 0, 1, 6)
 
     @staticmethod
@@ -177,7 +186,7 @@ class EquationRow(QFrame):
 
     def _apply_border(self, active):
         width = 2 if active else 1
-        opacity = "" if active else "88"  # pasifken hafif soluk kenarlık
+        opacity = "" if active else "88"
         self.setStyleSheet(
             f"QFrame#row {{ border: {width}px solid {self.color_hex}{opacity}; }}"
         )
@@ -193,6 +202,9 @@ class EquationRow(QFrame):
         self.waveform_plot.reset_ring()
         self.spectrum_plot.clear()
         self.vector_plot.clear()
+        self._vector_path_prepared = False
+        self._vector_xs = None
+        self._vector_ys = None
 
     def apply_settings(self):
         """Arayüzdeki güncel değerleri motora aktarır (her Çal/Birleştir'de)."""
@@ -203,10 +215,45 @@ class EquationRow(QFrame):
         self.melody_engine.instrument = self.instrument_combo.currentText()
         self.melody_engine.note_duration = self.duration_input.value()
         self.melody_engine.gain = self.gain_input.value()
+        self._vector_path_prepared = False
+
+    def prepare_vector_path(self):
+        """Denklemin sabit çizim yolunu çalma başlamadan bir kez hesaplar."""
+        t_samples = np.linspace(
+            0.0,
+            self.vector_t_end,
+            self.vector_point_count,
+            dtype=np.float64
+        )
+
+        xs, ys = self.equation_engine.evaluate_array(t_samples)
+        self._vector_xs = np.asarray(xs, dtype=np.float64)
+        self._vector_ys = (
+            None if ys is None else np.asarray(ys, dtype=np.float64)
+        )
+
+        self.vector_plot.update_from_xy(self._vector_xs, self._vector_ys)
+        self.vector_plot.set_draw_progress(0.0)
+        self._vector_path_prepared = True
+
+        return self._vector_xs, self._vector_ys
+
+    def update_spectrum(self, wave_chunk):
+        """FFT spektrumu, vektör çiziminden bağımsız güncellenir."""
+        self.spectrum_plot.update_from_audio(wave_chunk)
+
+    def update_heavy_graphs(self, wave_chunk):
+        """Eski çağrı noktalarıyla uyumluluk. Denklem yolu kaydırılmaz."""
+        self.update_spectrum(wave_chunk)
+        if not self._vector_path_prepared:
+            return self.prepare_vector_path()
+        return self._vector_xs, self._vector_ys
+
+    def update_waveform(self, wave_chunk):
+        self.waveform_plot.push_audio(wave_chunk)
 
     def make_fresh_melody_engine(self):
-        """İndirme (offline render) için canlı akışa dokunmayan, aynı
-        ayarlara sahip TAZE bir MelodyEngine kopyası üretir."""
+        """İndirme için canlı akışa dokunmayan, aynı ayarlara sahip kopya üretir."""
         self.apply_settings()
         return MelodyEngine(
             self.equation_engine, self.note_mapper, self.synth,
@@ -216,25 +263,8 @@ class EquationRow(QFrame):
             sample_rate=self.sample_rate,
         )
 
-    def update_waveform(self, wave_chunk):
-        self.waveform_plot.push_audio(wave_chunk)
-
-    def update_heavy_graphs(self, wave_chunk):
-        """Spektrum + vektör grafiklerini günceller. Denklem eğrisini
-        (xs, ys) SADECE BURADA bir kez hesaplar ve döndürür; MainWindow
-        bu sonucu COMBINED panel için tekrar (aynı denklemi ikinci kez
-        eval etmeden) kullanır."""
-        self.spectrum_plot.update_from_audio(wave_chunk)
-
-        elapsed = self.melody_engine._next_note_sample / self.sample_rate
-        window = np.linspace(max(0.0, elapsed - 2.0), elapsed + 0.01, 100)
-        xs, ys = self.equation_engine.evaluate_array(window)
-        self.vector_plot.update_from_xy(xs, ys)
-        return xs, ys
-
 
 class MainWindow(QMainWindow):
-
     def __init__(self, synth, audio_engine):
         super().__init__()
         self.setWindowTitle("Sinyal Laboratuvarı — Matematiksel Enstrüman Sentezleyici")
@@ -250,12 +280,18 @@ class MainWindow(QMainWindow):
         self._row_counter = 0
         self._last_combined = None
         self._last_per_voice = {}
+        self._audio_chunk_version = 0
+        # Tek tuple halinde atomik referans değişimi; ses callback'i lock beklemez.
+        self._audio_snapshot = (None, {}, 0)
+        self._last_visualized_chunk_version = -1
         self._tick_counter = 0
+        self._combined_vector_duration = None
+        self._accept_audio_chunks = False
 
         self._build_ui()
         self.add_row()
 
-        self.timer = QTimer()
+        self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh_graphs)
         self.timer.start(FAST_TICK_MS)
 
@@ -275,7 +311,6 @@ class MainWindow(QMainWindow):
         self.add_button = QPushButton("+ Denklem Ekle")
         self.add_button.clicked.connect(self.add_row)
         header.addWidget(self.add_button)
-
         main_layout.addLayout(header)
 
         self.scroll = QScrollArea()
@@ -308,7 +343,6 @@ class MainWindow(QMainWindow):
         self.combined_download_button = QPushButton("⬇ Birleşimi İndir")
         self.combined_download_button.clicked.connect(self.download_combined)
         combined_header.addWidget(self.combined_download_button)
-
         combined_layout.addLayout(combined_header)
 
         self.legend_layout = QHBoxLayout()
@@ -323,7 +357,6 @@ class MainWindow(QMainWindow):
         combined_graphs.addWidget(self._titled(self.combined_spectrum, "SPEKTRUM"))
         combined_graphs.addWidget(self._titled(self.combined_vector, "VEKTÖR MATRİSİ"))
         combined_layout.addLayout(combined_graphs)
-
         main_layout.addWidget(combined_frame, stretch=2)
 
     @staticmethod
@@ -375,16 +408,40 @@ class MainWindow(QMainWindow):
             self.legend_layout.addWidget(label)
         self.legend_layout.addStretch()
 
+    def _prepare_vector_plots(self, rows):
+        """Vektör yollarını bir kere üretir ve çizimi sıfırdan başlatır."""
+        xy_dict = {}
+        colors = {}
+
+        self.combined_vector.clear()
+
+        for row in rows:
+            xs, ys = row.prepare_vector_path()
+            xy_dict[row.row_id] = (xs, ys)
+            colors[row.row_id] = row.color
+
+        if xy_dict:
+            self.combined_vector.push(xy_dict, colors)
+            self.combined_vector.set_draw_progress(0.0)
+            self._combined_vector_duration = max(
+                row.vector_t_end for row in rows
+            )
+        else:
+            self._combined_vector_duration = None
+
     # ------------------------------------------------------------
 
     def play_single(self, row):
         row.apply_settings()
 
-        for r in self.rows:
-            r.set_playing(r is row)
+        for other_row in self.rows:
+            other_row.set_playing(other_row is row)
 
+        self._prepare_vector_plots([row])
+        self._accept_audio_chunks = False
         self.audio_engine.set_voices({row.row_id: row.melody_engine})
         self.audio_engine.start()
+        self._accept_audio_chunks = True
 
     def play_combined(self):
         if not self.rows:
@@ -394,15 +451,27 @@ class MainWindow(QMainWindow):
             row.apply_settings()
             row.set_playing(True)
 
+        self._prepare_vector_plots(self.rows)
         voices = {row.row_id: row.melody_engine for row in self.rows}
+        self._accept_audio_chunks = False
         self.audio_engine.set_voices(voices)
         self.audio_engine.start()
+        self._accept_audio_chunks = True
 
     def stop_all(self):
+        self._accept_audio_chunks = False
         self.audio_engine.stop()
         for row in self.rows:
             row.set_playing(False)
+
         self.combined_waveform.reset_rings()
+        self.combined_spectrum.clear()
+        self.combined_vector.clear()
+        self._combined_vector_duration = None
+        self._last_combined = None
+        self._last_per_voice = {}
+        self._audio_snapshot = (None, {}, self._audio_chunk_version)
+        self._last_visualized_chunk_version = self._audio_chunk_version
 
     # ------------------------------------------------------------
 
@@ -419,7 +488,10 @@ class MainWindow(QMainWindow):
 
     def download_combined(self):
         def build_voices():
-            return {row.row_id: row.make_fresh_melody_engine() for row in self.rows}
+            return {
+                row.row_id: row.make_fresh_melody_engine()
+                for row in self.rows
+            }
 
         dialog = DownloadDialog(
             "Birleştirilmiş tüm denklemleri indir",
@@ -430,41 +502,73 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------
 
     def _on_chunk(self, combined_wave, per_voice):
+        # Callback ses thread'inden gelir. QWidget'e dokunmadan yalnızca son bloğu aktar.
+        if not self._accept_audio_chunks:
+            return
+
+        self._audio_chunk_version += 1
+        # Python referans ataması atomiktir; ses callback'i GUI kilidinde beklemez.
+        self._audio_snapshot = (
+            combined_wave,
+            per_voice,
+            self._audio_chunk_version
+        )
         self._last_combined = combined_wave
         self._last_per_voice = per_voice
 
     def _refresh_graphs(self):
-        if self._last_combined is None:
+        # Ses thread'inin tek hamlede yayınladığı son blok görüntüsünü al.
+        combined_wave, per_voice_snapshot, chunk_version = self._audio_snapshot
+        per_voice = dict(per_voice_snapshot)
+
+        if combined_wave is None:
             return
 
         self._tick_counter += 1
         heavy = (self._tick_counter % HEAVY_TICK_EVERY == 0)
-
         colors = {row.row_id: row.color for row in self.rows}
 
-        # Hızlı (her tik): kayan osiloskoplar
-        for row in self.rows:
-            wave = self._last_per_voice.get(row.row_id)
-            if wave is not None:
-                row.update_waveform(wave)
-
-        self.combined_waveform.push(self._last_per_voice, colors)
-
-        # Ağır (her N tikte bir): spektrum + vektör. Denklem eğrisi
-        # (xs, ys) her satır için SADECE BİR KEZ hesaplanır
-        # (update_heavy_graphs içinde) ve hem satırın kendi vektör
-        # grafiğinde hem de COMBINED vektör grafiğinde tekrar
-        # kullanılır — eskiden aynı eval() ikinci kez de çağrılıyordu.
-        if heavy:
-            xy_dict = {}
+        # Aynı ses bloğunu 60 FPS boyunca tekrar tekrar RingBuffer'a yazma.
+        # Waveform'lar yalnızca yeni AudioEngine bloğu geldiğinde beslenir.
+        new_audio_chunk = chunk_version != self._last_visualized_chunk_version
+        if new_audio_chunk:
             for row in self.rows:
-                wave = self._last_per_voice.get(row.row_id)
+                wave = per_voice.get(row.row_id)
                 if wave is not None:
-                    xs, ys = row.update_heavy_graphs(wave)
-                    xy_dict[row.row_id] = (xs, ys)
+                    row.update_waveform(wave)
 
-            self.combined_spectrum.push(self._last_per_voice, colors)
-            self.combined_vector.push(xy_dict, colors)
+            self.combined_waveform.push(per_voice, colors)
+            self._last_visualized_chunk_version = chunk_version
+
+        # Tek zaman kaynağı: AudioEngine'in DAC zamanından hesaplanan oynatma konumu.
+        playback_time = self.audio_engine.playback_position_seconds
+
+        # Kalemin ilerlemesi her GUI karesinde güncellenir; geometri sabit kalır.
+        for row in self.rows:
+            if row.is_playing and row._vector_path_prepared:
+                progress = np.clip(
+                    playback_time / max(row.vector_t_end, 1e-9),
+                    0.0,
+                    1.0
+                )
+                row.vector_plot.set_draw_progress(progress)
+
+        if self._combined_vector_duration is not None:
+            combined_progress = np.clip(
+                playback_time / max(self._combined_vector_duration, 1e-9),
+                0.0,
+                1.0
+            )
+            self.combined_vector.set_draw_progress(combined_progress)
+
+        # FFT yalnızca yeni bir blok geldiğinde ve ağır tikte çalışır.
+        if heavy and new_audio_chunk:
+            for row in self.rows:
+                wave = per_voice.get(row.row_id)
+                if wave is not None:
+                    row.update_spectrum(wave)
+
+            self.combined_spectrum.push(per_voice, colors)
 
     def closeEvent(self, event):
         self.audio_engine.hard_stop()
