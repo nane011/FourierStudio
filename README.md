@@ -1,3 +1,4 @@
+📜 License: This project is licensed under open-source conditions. You can use it anywhere, but you MUST credit Gamze Mısır in your descriptions.
 
 NOT:
 Program Hugola kanalının https://www.youtube.com/watch?v=zLj4Y4RE0Do videosundan esinlenerek yapılmış hobi projesidir. Bazı denklemlerde veya çok fazla denklem
